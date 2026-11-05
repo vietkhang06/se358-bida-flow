@@ -1,0 +1,231 @@
+{
+  "schemaVersion": 1,
+  "documentStatus": "CODE_OBSERVED_NOT_TEAM_APPROVED",
+  "sourceSnapshot": "se358-bida-flow-main.zip (user-supplied 2026-11-05)",
+  "lastVerifiedDate": "2026-11-05",
+  "endpoint": "POST /api/action",
+  "requestShape": "{action:string,payload?:object}",
+  "successShape": "{ok:true,data:unknown}",
+  "errorShape": "{error:string}",
+  "requiresSameOriginCheck": true,
+  "requiresAuthentication": true,
+  "actionCount": 42,
+  "actions": {
+    "area.delete": {
+      "implementation": "delegated",
+      "permission": "TABLES_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "area.save": {
+      "implementation": "delegated",
+      "permission": "TABLES_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "category.delete": {
+      "implementation": "delegated",
+      "permission": "PRODUCTS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "category.save": {
+      "implementation": "delegated",
+      "permission": "PRODUCTS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "customer.save": {
+      "implementation": "legacy-switch",
+      "permission": "CUSTOMERS_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "inventory.move": {
+      "implementation": "legacy-switch",
+      "permission": "INVENTORY_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "invoice.adjust": {
+      "implementation": "legacy-switch",
+      "permission": "INVOICES_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "invoice.cancel": {
+      "implementation": "legacy-switch",
+      "permission": "INVOICES_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "invoice.create": {
+      "implementation": "legacy-switch",
+      "permission": "INVOICES_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "invoice.merge": {
+      "implementation": "legacy-switch",
+      "permission": "INVOICES_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "invoice.pay": {
+      "implementation": "legacy-switch",
+      "permission": "PAYMENTS_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "invoice.split": {
+      "implementation": "legacy-switch",
+      "permission": "INVOICES_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "membership.save": {
+      "implementation": "legacy-switch",
+      "permission": "MEMBERSHIPS_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "order.add": {
+      "implementation": "delegated",
+      "permission": "ORDERS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "order.item.status": {
+      "implementation": "delegated",
+      "permission": "ORDERS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "order.item.update": {
+      "implementation": "delegated",
+      "permission": "ORDERS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "password.change": {
+      "implementation": "legacy-switch",
+      "permission": "AUTHENTICATED_SELF",
+      "source": "app/api/action/route.ts"
+    },
+    "price.delete": {
+      "implementation": "delegated",
+      "permission": "PRICES_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "price.save": {
+      "implementation": "delegated",
+      "permission": "PRICES_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "product.delete": {
+      "implementation": "delegated",
+      "permission": "PRODUCTS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "product.save": {
+      "implementation": "delegated",
+      "permission": "PRODUCTS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "profile.update": {
+      "implementation": "legacy-switch",
+      "permission": "AUTHENTICATED_SELF",
+      "source": "app/api/action/route.ts"
+    },
+    "reservation.save": {
+      "implementation": "delegated",
+      "permission": "RESERVATIONS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "reservation.seat": {
+      "implementation": "delegated",
+      "permission": "SESSIONS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "reservation.status": {
+      "implementation": "delegated",
+      "permission": "RESERVATIONS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "role.permissions": {
+      "implementation": "legacy-switch",
+      "permission": "ROLES_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "session.end": {
+      "implementation": "delegated",
+      "permission": "SESSIONS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "session.pause": {
+      "implementation": "delegated",
+      "permission": "SESSIONS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "session.resume": {
+      "implementation": "delegated",
+      "permission": "SESSIONS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "session.start": {
+      "implementation": "delegated",
+      "permission": "SESSIONS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "session.transfer": {
+      "implementation": "delegated",
+      "permission": "SESSIONS_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "shift.close": {
+      "implementation": "legacy-switch",
+      "permission": "SHIFTS_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "shift.open": {
+      "implementation": "legacy-switch",
+      "permission": "SHIFTS_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "stock.count": {
+      "implementation": "legacy-switch",
+      "permission": "INVENTORY_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "table.delete": {
+      "implementation": "delegated",
+      "permission": "TABLES_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "table.save": {
+      "implementation": "delegated",
+      "permission": "TABLES_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "table.status": {
+      "implementation": "delegated",
+      "permission": "TABLE_STATUS",
+      "source": "lib/operations.ts"
+    },
+    "tableType.delete": {
+      "implementation": "delegated",
+      "permission": "PRICES_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "tableType.save": {
+      "implementation": "delegated",
+      "permission": "PRICES_MANAGE",
+      "source": "lib/operations.ts"
+    },
+    "tier.save": {
+      "implementation": "legacy-switch",
+      "permission": "MEMBERSHIPS_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "user.invite": {
+      "implementation": "legacy-switch",
+      "permission": "USERS_MANAGE",
+      "source": "app/api/action/route.ts"
+    },
+    "user.update": {
+      "implementation": "legacy-switch",
+      "permission": "USERS_MANAGE",
+      "source": "app/api/action/route.ts"
+    }
+  },
+  "approval": {
+    "apiProvider": "PENDING",
+    "uiConsumer": "PENDING",
+    "pmReviewer": "PENDING",
+    "SRSMapping": "PENDING"
+  }
+}
