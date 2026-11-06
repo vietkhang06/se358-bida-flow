@@ -214,9 +214,12 @@ export class AppError extends Error {
 }
 
 export function responseError(error: unknown) {
-  if (error instanceof AppError) return Response.json({ error: error.message }, { status: error.status });
+  if (error instanceof AppError) {
+    const codes: Record<number, string> = { 400: "VALIDATION_ERROR", 401: "UNAUTHENTICATED", 403: "FORBIDDEN", 404: "NOT_FOUND", 409: "CONFLICT", 422: "VALIDATION_ERROR", 429: "RATE_LIMITED" };
+    return Response.json({ error: error.message, code: codes[error.status] ?? "REQUEST_ERROR" }, { status: error.status });
+  }
   console.error(error);
-  return Response.json({ error: "Hệ thống đang bận. Vui lòng thử lại." }, { status: 500 });
+  return Response.json({ error: "Hệ thống đang bận. Vui lòng thử lại.", code: "INTERNAL_ERROR" }, { status: 500 });
 }
 
 export async function activeHourlyRate(tableId: string, at = new Date()) {

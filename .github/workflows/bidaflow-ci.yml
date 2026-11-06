@@ -1,0 +1,32 @@
+name: BidaFlow CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: bidaflow-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install exact dependencies
+        run: corepack pnpm install --frozen-lockfile
+      - name: TypeScript
+        run: corepack pnpm exec tsc --noEmit
+      - name: ESLint
+        run: corepack pnpm lint
+      - name: Node tests
+        run: corepack pnpm test
+      - name: Production build
+        run: corepack pnpm build

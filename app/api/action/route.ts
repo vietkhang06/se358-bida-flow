@@ -1,11 +1,11 @@
 import { executeOperation, operationPermissions } from "@/lib/operations";
+import { directActionPermissions, parseActionRequest, validateDirectActionPayload } from "@/lib/action-request-contract";
 import {
   AppError, assertSameOrigin, audit, code, getRawDb,
   hashPassword, id, normalizeEmail, nowIso, queryAll, queryOne, randomToken, requireUser,
   responseError, sha256Hex, validatePassword, verifyPassword,
 } from "@/lib/server";
 
-type Body = { action: string; payload?: Record<string, unknown> };
 const value = (data: Record<string, unknown>, key: string) => String(data[key] ?? "").trim();
 const numberValue = (data: Record<string, unknown>, key: string) => Number(data[key] ?? 0);
 const optional = (data: Record<string, unknown>, key: string) => value(data, key) || null;
@@ -37,10 +37,13 @@ export async function POST(request: Request) {
   try {
     assertSameOrigin(request);
     const user = await requireUser(request);
-    let body: Body;
-    try { body = await request.json() as Body; } catch { throw new AppError("JSON không hợp lệ."); }
-    if (!body || typeof body.action !== "string" || (body.payload !== undefined && (!body.payload || typeof body.payload !== "object" || Array.isArray(body.payload)))) throw new AppError("Yêu cầu không hợp lệ.");
-    const payload = body.payload ?? {};
+    let rawBody: unknown;
+    try { rawBody = await request.json(); } catch { throw new AppError("JSON không hợp lệ."); }
+    const body = parseActionRequest(rawBody);
+    const payload = body.payload;
+    const directPermission = directActionPermissions[body.action];
+    if (directPermission) requireAny(user, [directPermission]);
+    validateDirectActionPayload(body.action, payload);
     const db = getRawDb();
     let result: unknown = null;
 
@@ -188,8 +191,9 @@ export async function POST(request: Request) {
         if (!invoice || invoice.status !== "ISSUED") throw new AppError("Hóa đơn không ở trạng thái chờ thanh toán.");
         const alreadyPaid = Number((await queryOne<{ total: number }>("SELECT COALESCE(SUM(amount),0) AS total FROM payments WHERE invoice_id=?", invoiceId))?.total ?? 0);
         const amount = numberValue(payload, "amount") || invoice.total_amount - alreadyPaid;
-        if (amount <= 0 || alreadyPaid + amount > invoice.total_amount) throw new AppError("Số tiền thanh toán không hợp lệ.");
+        if (!Number.isSafeInteger(amount) || amount <= 0 || alreadyPaid + amount > invoice.total_amount) throw new AppError("Số tiền thanh toán không hợp lệ. Số tiền phải là số nguyên VND dương và không vượt quá số dư hóa đơn.");
         const method = required(payload, "method", "Phương thức thanh toán");
+        if (!["CASH", "BANK_TRANSFER", "CARD", "EWALLET"].includes(method)) throw new AppError("Phương thức không hợp lệ. Thanh toán qua cổng phải đi bằng payment intent và IPN đã xác minh.");
         const shift = await queryOne<{ id: string }>("SELECT id FROM work_shifts WHERE cashier_id=? AND status='OPEN'", user.id);
         if (method === "CASH" && !shift) throw new AppError("Bạn cần mở ca trước khi nhận thanh toán tiền mặt.");
         const paymentId = id("pay");
