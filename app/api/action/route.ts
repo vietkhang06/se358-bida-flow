@@ -190,6 +190,8 @@ export async function POST(request: Request) {
         const amount = numberValue(payload, "amount") || invoice.total_amount - alreadyPaid;
         if (amount <= 0 || alreadyPaid + amount > invoice.total_amount) throw new AppError("Số tiền thanh toán không hợp lệ.");
         const method = required(payload, "method", "Phương thức thanh toán");
+        const ALLOWED_METHODS = new Set(["CASH", "BANK_TRANSFER", "CARD", "EWALLET"]);
+        if (!ALLOWED_METHODS.has(method)) throw new AppError("Phương thức thanh toán không hợp lệ.");
         const shift = await queryOne<{ id: string }>("SELECT id FROM work_shifts WHERE cashier_id=? AND status='OPEN'", user.id);
         if (method === "CASH" && !shift) throw new AppError("Bạn cần mở ca trước khi nhận thanh toán tiền mặt.");
         const paymentId = id("pay");

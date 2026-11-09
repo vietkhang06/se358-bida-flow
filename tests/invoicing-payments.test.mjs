@@ -494,3 +494,94 @@ describe("BF-A13-04: Invoice Totals, Duplicate Payment & Failure Paths", () => {
     assert.equal(targetInv.table_amount, 120000);
   });
 });
+
+describe("BF-BILL-02: Validate Payment Method Enum and Payment Integrity", () => {
+  test("Rejects payment when method is not in allowed enum (CASH, BANK_TRANSFER, CARD, EWALLET)", async () => {
+    const { actionRoute, cashierCookie, server } = fixture;
+    const db = server.getRawDb();
+    await seedBilliardEnvironment(db);
+
+    const now = new Date().toISOString();
+    await db.prepare(
+      "INSERT INTO play_sessions (id, code, table_id, opened_by, status, started_at, ended_at, table_amount) VALUES ('ses_enum', 'PS-ENUM', 'tbl_101', 'usr_cashier', 'CLOSED', ?, ?, 80000)"
+    ).bind(now, now).run();
+
+    const invRes = await actionRoute.POST(createJsonRequest("http://localhost:3000/api/action", "POST", {
+      action: "invoice.create",
+      payload: { sessionId: "ses_enum" },
+    }, cashierCookie));
+    const { data: { invoiceId } } = await invRes.json();
+
+    // 1. Invalid method: BITCOIN -> 400
+    const btcRes = await actionRoute.POST(createJsonRequest("http://localhost:3000/api/action", "POST", {
+      action: "invoice.pay",
+      payload: { invoiceId, method: "BITCOIN", amount: 80000 },
+    }, cashierCookie));
+    assert.equal(btcRes.status, 400);
+    const btcJson = await btcRes.json();
+    assert.match(btcJson.error, /Phương thức thanh toán không hợp lệ/);
+
+    // 2. Invalid method: VOUCHER -> 400
+    const voucherRes = await actionRoute.POST(createJsonRequest("http://localhost:3000/api/action", "POST", {
+      action: "invoice.pay",
+      payload: { invoiceId, method: "VOUCHER", amount: 80000 },
+    }, cashierCookie));
+    assert.equal(voucherRes.status, 400);
+    const voucherJson = await voucherRes.json();
+    assert.match(voucherJson.error, /Phương thức thanh toán không hợp lệ/);
+
+    // 3. Invalid method: empty string -> 400
+    const emptyRes = await actionRoute.POST(createJsonRequest("http://localhost:3000/api/action", "POST", {
+      action: "invoice.pay",
+      payload: { invoiceId, method: "", amount: 80000 },
+    }, cashierCookie));
+    assert.equal(emptyRes.status, 400);
+
+    // 4. Invoice remains in ISSUED status
+    const inv = await server.queryOne("SELECT * FROM invoices WHERE id = ?", invoiceId);
+    assert.equal(inv.status, "ISSUED");
+    assert.equal(inv.paid_at, null);
+  });
+
+  test("Accepts EWALLET payment with reference and records payment accurately", async () => {
+    const { actionRoute, cashierCookie, server } = fixture;
+    const db = server.getRawDb();
+    await seedBilliardEnvironment(db);
+
+    const now = new Date().toISOString();
+    await db.prepare(
+      "INSERT INTO play_sessions (id, code, table_id, opened_by, status, started_at, ended_at, table_amount) VALUES ('ses_ewallet', 'PS-EWL', 'tbl_101', 'usr_cashier', 'CLOSED', ?, ?, 95000)"
+    ).bind(now, now).run();
+
+    const invRes = await actionRoute.POST(createJsonRequest("http://localhost:3000/api/action", "POST", {
+      action: "invoice.create",
+      payload: { sessionId: "ses_ewallet" },
+    }, cashierCookie));
+    const { data: { invoiceId } } = await invRes.json();
+
+    // Pay with EWALLET (Momo QR transaction)
+    const payRes = await actionRoute.POST(createJsonRequest("http://localhost:3000/api/action", "POST", {
+      action: "invoice.pay",
+      payload: {
+        invoiceId,
+        method: "EWALLET",
+        amount: 95000,
+        reference: "MOMO_TRX_987654321",
+      },
+    }, cashierCookie));
+    assert.equal(payRes.status, 200);
+
+    // Check payment record
+    const payment = await server.queryOne("SELECT * FROM payments WHERE invoice_id = ?", invoiceId);
+    assert.ok(payment);
+    assert.equal(payment.method, "EWALLET");
+    assert.equal(payment.amount, 95000);
+    assert.equal(payment.reference, "MOMO_TRX_987654321");
+    assert.equal(payment.received_by, "usr_cashier");
+
+    // Check invoice transition to PAID
+    const invoice = await server.queryOne("SELECT * FROM invoices WHERE id = ?", invoiceId);
+    assert.equal(invoice.status, "PAID");
+    assert.ok(invoice.paid_at);
+  });
+});

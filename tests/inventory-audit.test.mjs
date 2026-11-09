@@ -258,3 +258,76 @@ describe("BF-A14-01: Inventory Stock Receipt, Adjustment and Audit Trail", () =>
     assert.equal(cueProduct.stock_quantity, 0);
   });
 });
+
+describe("BF-INV-02: Low-Stock Alerts and Replenishment Workflow", () => {
+  test("Accurately identifies products at or below min_stock threshold in summary and triggers replenishment", async () => {
+    const { actionRoute, appRoute, warehouseCookie, adminCookie, server } = fixture;
+    const db = server.getRawDb();
+    await seedInventoryEnvironment(db);
+
+    // Seed additional items with defined thresholds:
+    // Product 1: Below threshold (stock 2 <= min_stock 5) -> Low stock
+    await db.prepare("INSERT INTO products (id, code, name, category_id, kind, unit, sale_price, cost_price, stock_quantity, min_stock, track_stock, active) VALUES ('p_low_1', 'LOW1', 'Trà chanh C2', 'cat_drink', 'PRODUCT', 'Chai', 12000, 7000, 2, 5, 1, 1)").run();
+
+    // Product 2: Exactly at threshold (stock 5 <= min_stock 5) -> Low stock
+    await db.prepare("INSERT INTO products (id, code, name, category_id, kind, unit, sale_price, cost_price, stock_quantity, min_stock, track_stock, active) VALUES ('p_low_2', 'LOW2', 'Khăn lạnh', 'cat_drink', 'PRODUCT', 'Cái', 5000, 2000, 5, 5, 1, 1)").run();
+
+    // Product 3: Above threshold (stock 15 > min_stock 5) -> Normal
+    await db.prepare("INSERT INTO products (id, code, name, category_id, kind, unit, sale_price, cost_price, stock_quantity, min_stock, track_stock, active) VALUES ('p_norm', 'NORM', 'Bia Heineken', 'cat_drink', 'PRODUCT', 'Lon', 30000, 20000, 15, 5, 1, 1)").run();
+
+    // Query app summary: Red Bull (20 > 5), Lays (10 > 3), p_cue_rent (untracked 0), p_low_1 (2 <= 5), p_low_2 (5 <= 5)
+    // Low stock count should be exactly 2
+    let appRes = await appRoute.GET(createJsonRequest("http://localhost:3000/api/app", "GET", null, adminCookie));
+    assert.equal(appRes.status, 200);
+    let appData = await appRes.json();
+    assert.equal(appData.summary.low_stock_count, 2);
+
+    // Replenishment step 1: Replenish p_low_1 with 10 units via inventory.move (IN)
+    const replenish1 = await actionRoute.POST(createJsonRequest("http://localhost:3000/api/action", "POST", {
+      action: "inventory.move",
+      payload: {
+        productId: "p_low_1",
+        type: "IN",
+        quantity: 10,
+        unitCost: 7000,
+        reason: "Nhập bổ sung hàng sắp hết",
+      },
+    }, warehouseCookie));
+    assert.equal(replenish1.status, 200);
+
+    // Check p_low_1 stock is now 2 + 10 = 12 (> min_stock 5)
+    const p1 = await server.queryOne("SELECT stock_quantity FROM products WHERE id = 'p_low_1'");
+    assert.equal(p1.stock_quantity, 12);
+
+    // Low stock count drops from 2 to 1 (only p_low_2 remains low-stock)
+    appRes = await appRoute.GET(createJsonRequest("http://localhost:3000/api/app", "GET", null, adminCookie));
+    appData = await appRes.json();
+    assert.equal(appData.summary.low_stock_count, 1);
+
+    // Replenishment step 2: Replenish p_low_2 with 20 units via inventory.move (IN)
+    const replenish2 = await actionRoute.POST(createJsonRequest("http://localhost:3000/api/action", "POST", {
+      action: "inventory.move",
+      payload: {
+        productId: "p_low_2",
+        type: "IN",
+        quantity: 20,
+        unitCost: 2000,
+        reason: "Nhập thêm khăn lạnh đầy kho",
+      },
+    }, warehouseCookie));
+    assert.equal(replenish2.status, 200);
+
+    // Check p_low_2 stock is now 5 + 20 = 25 (> min_stock 5)
+    const p2 = await server.queryOne("SELECT stock_quantity FROM products WHERE id = 'p_low_2'");
+    assert.equal(p2.stock_quantity, 25);
+
+    // Low stock count drops to 0
+    appRes = await appRoute.GET(createJsonRequest("http://localhost:3000/api/app", "GET", null, adminCookie));
+    appData = await appRes.json();
+    assert.equal(appData.summary.low_stock_count, 0);
+
+    // Verify audit logs generated for replenishments
+    const auditLogs = await server.queryAll("SELECT * FROM audit_logs WHERE action = 'INVENTORY_MOVED' AND entity_id IN ('p_low_1', 'p_low_2')");
+    assert.equal(auditLogs.length, 2);
+  });
+});
