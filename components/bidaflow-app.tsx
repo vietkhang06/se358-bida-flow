@@ -32,6 +32,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Toaster } from "@/components/ui/sonner";
+import { ReportsView, type ReportFilterValue } from "@/components/reports-view";
 import { cn } from "@/lib/utils";
 
 declare global {
@@ -185,7 +186,22 @@ export function BidaFlowApp() {
   const [loading, setLoading] = React.useState(true);
   const [page, setPage] = React.useState("tables");
   const [form, setForm] = React.useState<FormConfig | null>(null);
-  const loadData = React.useCallback(async () => { const next = await requestJson("/api/app"); setData(next); setAuth((current) => current ? { ...current, user: next.user } : { initialized: true, user: next.user }); }, []);
+  const [reportFilter, setReportFilter] = React.useState<ReportFilterValue | null>(null);
+  const reportFilterRef = React.useRef<ReportFilterValue | null>(null);
+  const loadData = React.useCallback(async (overrideFilter?: ReportFilterValue | null) => {
+    const activeFilter = overrideFilter !== undefined ? overrideFilter : reportFilterRef.current;
+    const params = activeFilter
+      ? `?reportFrom=${encodeURIComponent(activeFilter.from)}&reportTo=${encodeURIComponent(activeFilter.to)}&reportTz=${encodeURIComponent(activeFilter.tz)}`
+      : "";
+    const next = await requestJson(`/api/app${params}`);
+    setData(next);
+    setAuth((current) => current ? { ...current, user: next.user } : { initialized: true, user: next.user });
+  }, []);
+  const applyReportFilter = React.useCallback(async (nextFilter: ReportFilterValue | null) => {
+    await loadData(nextFilter);
+    reportFilterRef.current = nextFilter;
+    setReportFilter(nextFilter);
+  }, [loadData]);
   const loadAuth = React.useCallback(async () => { try { const next = await requestJson("/api/auth/status"); setAuth(next); if (next.user) await loadData(); } catch (error) { toast.error(error instanceof Error ? error.message : "Không thể kết nối hệ thống"); } finally { setLoading(false); } }, [loadData]);
   React.useEffect(() => { queueMicrotask(() => { void loadAuth(); }); }, [loadAuth]);
   React.useEffect(() => { if (!auth?.user) return; const timer = window.setInterval(() => loadData().catch(() => undefined), 30000); return () => window.clearInterval(timer); }, [auth?.user, loadData]);
@@ -220,18 +236,18 @@ export function BidaFlowApp() {
     tools.forEach((tool) => { try { void Promise.resolve(register(tool, { signal: lifecycle.signal })).catch(() => undefined); } catch { /* unsupported implementation */ } });
     return () => lifecycle.abort();
   }, [auth?.user, data, loadData, run]);
-  const logout = async () => { await requestJson("/api/auth/logout", { method: "POST", body: "{}" }); setData(null); setAuth({ initialized: true, user: null }); };
+  const logout = async () => { await requestJson("/api/auth/logout", { method: "POST", body: "{}" }); reportFilterRef.current = null; setReportFilter(null); setData(null); setAuth({ initialized: true, user: null }); };
   if (loading) return <LoadingScreen />;
   if (!auth?.user) return <><AuthScreen initialized={auth?.initialized ?? false} onSuccess={loadAuth} /><Toaster richColors /></>;
   if (!data) return <LoadingScreen />;
-  return <SidebarProvider><AppShell data={data} page={page} setPage={setPage} run={run} openForm={setForm} reload={loadData} logout={logout} /><QuickForm config={form} onClose={() => setForm(null)} /><Toaster richColors /></SidebarProvider>;
+  return <SidebarProvider><AppShell data={data} page={page} setPage={setPage} run={run} openForm={setForm} reload={() => loadData()} logout={logout} reportFilter={reportFilter} applyReportFilter={applyReportFilter} /><QuickForm config={form} onClose={() => setForm(null)} /><Toaster richColors /></SidebarProvider>;
 }
 
 function LoadingScreen() {
   return <div className="grid min-h-screen place-items-center bg-[#f2f6f4]"><div className="space-y-4 text-center"><Logo dark /><div className="flex items-center gap-2 text-sm text-slate-500"><RefreshCw className="size-4 animate-spin" />Đang chuẩn bị không gian làm việc...</div></div></div>;
 }
 
-type ShellProps = { data: AppData; page: string; setPage: (page: string) => void; run: (action: string, payload?: Record<string, any>, refresh?: boolean) => Promise<any>; openForm: (form: FormConfig) => void; reload: () => Promise<void>; logout: () => Promise<void> };
+type ShellProps = { data: AppData; page: string; setPage: (page: string) => void; run: (action: string, payload?: Record<string, any>, refresh?: boolean) => Promise<any>; openForm: (form: FormConfig) => void; reload: () => Promise<void>; logout: () => Promise<void>; reportFilter?: ReportFilterValue | null; applyReportFilter?: (next: ReportFilterValue | null) => Promise<void> };
 
 function AppShell(props: ShellProps) {
   const { setOpenMobile } = useSidebar();
@@ -270,7 +286,7 @@ function PageContent(props: ShellProps & { permission: (code: string) => boolean
   if (props.page === "billing") return <BillingView {...props} />;
   if (props.page === "inventory") return <InventoryView {...props} />;
   if (props.page === "shifts") return <ShiftsView {...props} />;
-  if (props.page === "reports") return <ReportsView {...props} />;
+  if (props.page === "reports") return <ReportsView report={props.data.report} reportMeta={props.data.reportMeta} activeFilter={props.reportFilter ?? null} onApplyFilter={props.applyReportFilter ?? (async () => {})} />;
   if (props.page === "admin") return <AdminView {...props} />;
   if (props.page === "audit") return <AuditView {...props} />;
   return <ProfileView {...props} />;
@@ -452,21 +468,6 @@ function ShiftsView(props: ShellProps) {
     <Card className={cn("mb-6 overflow-hidden border-0 text-white", openShift ? "bg-gradient-to-br from-[#0b6b55] to-[#123f35]" : "bg-gradient-to-br from-slate-600 to-slate-800")}><CardContent className="grid gap-6 px-6 py-7 sm:grid-cols-[1fr_auto] sm:items-center"><div><div className="mb-3 flex items-center gap-2"><Activity className="size-5" /><span className="text-sm font-medium text-white/70">Trạng thái cá nhân</span></div><h3 className="text-3xl font-semibold">{openShift ? "Ca đang mở" : "Chưa mở ca"}</h3><p className="mt-2 text-sm text-white/65">{openShift ? `Bắt đầu ${dateTime(openShift.opened_at)} · tiền đầu ca ${money(openShift.opening_cash)}` : "Mở ca trước khi nhận thanh toán tiền mặt."}</p></div>{openShift && <div className="rounded-2xl bg-white/10 px-5 py-4 text-right"><p className="text-xs text-white/60">Mã ca</p><p className="mt-1 font-mono font-semibold">{openShift.code}</p></div>}</CardContent></Card>
     <Card className="gap-0 overflow-hidden py-0"><Table><TableHeader><TableRow><TableHead>Mã ca</TableHead><TableHead>Thu ngân</TableHead><TableHead>Mở ca</TableHead><TableHead>Chốt ca</TableHead><TableHead>Dự kiến</TableHead><TableHead>Thực tế</TableHead><TableHead>Chênh lệch</TableHead><TableHead>Trạng thái</TableHead></TableRow></TableHeader><TableBody>{(props.data.shifts as Row[]).map((row) => <TableRow key={row.id}><TableCell className="font-mono text-xs">{row.code}</TableCell><TableCell>{row.cashier_name}</TableCell><TableCell>{dateTime(row.opened_at)}</TableCell><TableCell>{dateTime(row.closed_at)}</TableCell><TableCell>{row.expected_cash == null ? "-" : money(row.expected_cash)}</TableCell><TableCell>{row.actual_cash == null ? "-" : money(row.actual_cash)}</TableCell><TableCell className={cn(Number(row.difference) !== 0 && "font-semibold text-rose-600")}>{row.difference == null ? "-" : money(row.difference)}</TableCell><TableCell><StatusBadge value={row.status} /></TableCell></TableRow>)}</TableBody></Table></Card>
   </>;
-}
-
-function ReportsView(props: ShellProps) {
-  const report = props.data.report ?? { revenue: [], tables: [], products: [], inventory: [] };
-  const revenue = report.revenue as Row[];
-  const maxRevenue = Math.max(1, ...revenue.map((item) => Number(item.revenue)));
-  return <><SectionHeader title="Báo cáo & thống kê" description="Chỉ tổng hợp hóa đơn đã thanh toán và giao dịch kho hợp lệ." />
-    <div className="grid gap-5 xl:grid-cols-[1.4fr_.6fr]"><Card className="gap-4"><CardHeader><CardTitle>Doanh thu 30 ngày</CardTitle><CardDescription>Phân tách tiền bàn và sản phẩm/dịch vụ</CardDescription></CardHeader><CardContent><div className="flex h-64 items-end gap-2 overflow-x-auto pb-2">{revenue.length ? revenue.map((item) => <div key={item.day} className="group flex h-full min-w-8 flex-1 flex-col justify-end gap-1"><div className="relative flex min-h-1 flex-col justify-end overflow-hidden rounded-t-lg bg-emerald-100" style={{ height: `${Math.max(4, Number(item.revenue) / maxRevenue * 100)}%` }} title={`${item.day}: ${money(item.revenue)}`}><div className="bg-amber-400" style={{ height: `${Number(item.service_revenue) / Math.max(1, Number(item.revenue)) * 100}%` }} /><div className="bg-emerald-600" style={{ height: `${Number(item.table_revenue) / Math.max(1, Number(item.revenue)) * 100}%` }} /></div><span className="truncate text-center text-[10px] text-muted-foreground">{String(item.day).slice(5)}</span></div>) : <div className="grid h-full w-full place-items-center text-sm text-muted-foreground">Chưa có doanh thu trong kỳ</div>}</div><div className="mt-4 flex gap-4 text-xs"><span className="flex items-center gap-2"><i className="size-2.5 rounded-full bg-emerald-600" />Tiền bàn</span><span className="flex items-center gap-2"><i className="size-2.5 rounded-full bg-amber-400" />Dịch vụ</span></div></CardContent></Card>
-      <Card className="gap-4"><CardHeader><CardTitle>Cơ cấu kỳ này</CardTitle><CardDescription>Từ các giao dịch hợp lệ</CardDescription></CardHeader><CardContent className="space-y-5">{(() => { const tableRevenue = revenue.reduce((sum, item) => sum + Number(item.table_revenue), 0); const serviceRevenue = revenue.reduce((sum, item) => sum + Number(item.service_revenue), 0); const total = tableRevenue + serviceRevenue; return <><div><p className="text-sm text-muted-foreground">Tổng doanh thu</p><p className="mt-1 text-3xl font-semibold">{money(total)}</p></div><div className="space-y-3"><div><div className="mb-1 flex justify-between text-xs"><span>Tiền bàn</span><span>{total ? Math.round(tableRevenue / total * 100) : 0}%</span></div><Progress value={total ? tableRevenue / total * 100 : 0} /></div><div><div className="mb-1 flex justify-between text-xs"><span>Sản phẩm / dịch vụ</span><span>{total ? Math.round(serviceRevenue / total * 100) : 0}%</span></div><Progress value={total ? serviceRevenue / total * 100 : 0} /></div></div></>; })()}</CardContent></Card></div>
-    <div className="mt-5 grid gap-5 xl:grid-cols-2"><ReportTable title="Hiệu suất bàn" columns={["Bàn", "Số phiên", "Thời gian", "Doanh thu"]} rows={(report.tables as Row[]).map((item) => [item.name, item.session_count, `${Math.round(Number(item.minutes))} phút`, money(item.revenue)])} /><ReportTable title="Sản phẩm bán chạy" columns={["Sản phẩm", "Số lượng", "Doanh thu"]} rows={(report.products as Row[]).map((item) => [item.name, item.quantity, money(item.revenue)])} /><ReportTable title="Nhập - xuất - tồn" columns={["Hàng hóa", "Nhập", "Xuất", "Tồn"]} rows={(report.inventory as Row[]).map((item) => [item.name, item.imported, item.exported, item.stock_quantity])} /></div>
-  </>;
-}
-
-function ReportTable({ title, columns, rows }: { title: string; columns: string[]; rows: any[][] }) {
-  return <Card className="gap-0 overflow-hidden py-0"><div className="border-b px-5 py-4"><h3 className="font-semibold">{title}</h3></div><Table><TableHeader><TableRow>{columns.map((column) => <TableHead key={column}>{column}</TableHead>)}</TableRow></TableHeader><TableBody>{rows.length ? rows.map((row, index) => <TableRow key={index}>{row.map((cell, cellIndex) => <TableCell key={cellIndex}>{cell}</TableCell>)}</TableRow>) : <TableRow><TableCell colSpan={columns.length} className="h-28 text-center text-muted-foreground">Chưa có dữ liệu</TableCell></TableRow>}</TableBody></Table></Card>;
 }
 
 function AdminView(props: ShellProps) {

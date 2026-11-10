@@ -1,4 +1,11 @@
 import { effectiveTableStatus } from "@/lib/operation-validation";
+import {
+  DEFAULT_REPORT_TIMEZONE,
+  localDateInTimeZone,
+  queryReportSnapshot,
+  resolveDayRangeUtc,
+  resolveReportFilter,
+} from "@/lib/reporting";
 import { sessionTiming, queryAll, queryOne, requireUser, responseError } from "@/lib/server";
 
 function allowed(user: Awaited<ReturnType<typeof requireUser>>, permission: string) {
@@ -72,39 +79,58 @@ export async function GET(request: Request) {
       ...table, status: effectiveTableStatus(table as { status: string }),
     }));
 
-    const report = allowed(user, "REPORTS_VIEW") ? {
-      revenue: await queryAll(`SELECT substr(paid_at,1,10) AS day, SUM(total_amount) AS revenue, SUM(table_amount) AS table_revenue,
-        SUM(service_amount) AS service_revenue FROM invoices WHERE status = 'PAID' AND paid_at >= datetime('now','-30 day') GROUP BY substr(paid_at,1,10) ORDER BY day`),
-      tables: await queryAll(`SELECT bt.name, COUNT(ps.id) AS session_count, COALESCE(SUM(ps.table_amount),0) AS revenue,
-        COALESCE(SUM((julianday(ps.ended_at)-julianday(ps.started_at))*24*60),0) AS minutes
-        FROM billiard_tables bt LEFT JOIN play_sessions ps ON ps.table_id = bt.id AND ps.status = 'CLOSED'
-        GROUP BY bt.id ORDER BY revenue DESC`),
-      products: await queryAll(`SELECT ii.description AS name, SUM(ii.quantity) AS quantity, SUM(ii.amount) AS revenue
-        FROM invoice_items ii JOIN invoices i ON i.id = ii.invoice_id WHERE i.status = 'PAID' AND ii.source_type IN ('PRODUCT','SERVICE')
-        GROUP BY ii.description ORDER BY revenue DESC LIMIT 20`),
-      inventory: await queryAll(`SELECT p.name, p.stock_quantity, p.min_stock,
-        COALESCE(SUM(CASE WHEN it.type='IN' THEN it.quantity ELSE 0 END),0) AS imported,
-        COALESCE(SUM(CASE WHEN it.type IN ('OUT','SALE') THEN it.quantity ELSE 0 END),0) AS exported
-        FROM products p LEFT JOIN inventory_transactions it ON it.product_id = p.id GROUP BY p.id ORDER BY p.name`),
-    } : null;
+    const canViewReports = allowed(user, "REPORTS_VIEW");
+    const url = new URL(request.url);
+    const reportFilter = canViewReports
+      ? resolveReportFilter({
+          from: url.searchParams.get("reportFrom") ?? url.searchParams.get("from"),
+          to: url.searchParams.get("reportTo") ?? url.searchParams.get("to"),
+          tz: url.searchParams.get("reportTz") ?? url.searchParams.get("tz"),
+          now: sampledAt,
+        })
+      : null;
 
-    const summary = await queryOne<Record<string, number>>(`SELECT
-      (SELECT COUNT(*) FROM billiard_tables WHERE active=1) AS table_count,
-      (SELECT COUNT(*) FROM billiard_tables WHERE status='PLAYING' AND active=1) AS playing_count,
-      (SELECT COUNT(*) FROM reservations WHERE status IN ('PENDING','CONFIRMED') AND date(starts_at)=date('now')) AS reservation_count,
-      (SELECT COALESCE(SUM(total_amount),0) FROM invoices WHERE status='PAID' AND date(paid_at)=date('now')) AS today_revenue,
-      (SELECT COUNT(*) FROM products WHERE active=1 AND track_stock=1 AND stock_quantity <= min_stock) AS low_stock_count`);
+    const businessTz = reportFilter?.timezone ?? DEFAULT_REPORT_TIMEZONE;
+    const todayRange = resolveDayRangeUtc(localDateInTimeZone(sampledAt, businessTz), businessTz);
+
+    const [report, summary] = await Promise.all([
+      reportFilter ? queryReportSnapshot(reportFilter) : Promise.resolve(null),
+      queryOne<Record<string, number>>(
+        `SELECT
+          (SELECT COUNT(*) FROM billiard_tables WHERE active=1) AS table_count,
+          (SELECT COUNT(*) FROM billiard_tables WHERE status='PLAYING' AND active=1) AS playing_count,
+          (SELECT COUNT(*) FROM reservations WHERE status IN ('PENDING','CONFIRMED')
+            AND julianday(starts_at) >= julianday(?) AND julianday(starts_at) < julianday(?)) AS reservation_count,
+          (SELECT COALESCE(SUM(total_amount),0) FROM invoices WHERE status='PAID' AND paid_at IS NOT NULL
+            AND julianday(paid_at) >= julianday(?) AND julianday(paid_at) < julianday(?)) AS today_revenue,
+          (SELECT COUNT(*) FROM products WHERE active=1 AND track_stock=1 AND stock_quantity <= min_stock) AS low_stock_count`,
+        todayRange.startUtc,
+        todayRange.endExclusiveUtc,
+        todayRange.startUtc,
+        todayRange.endExclusiveUtc,
+      ),
+    ]);
 
     return Response.json({
       user, summary: {
         table_count: canSeeTables ? summary?.table_count : undefined,
         playing_count: canSeeTables ? summary?.playing_count : undefined,
         reservation_count: canManageReservations || canSeat ? summary?.reservation_count : undefined,
-        today_revenue: allowed(user, "REPORTS_VIEW") ? summary?.today_revenue : undefined,
+        today_revenue: canViewReports ? summary?.today_revenue : undefined,
         low_stock_count: allowed(user, "INVENTORY_MANAGE") ? summary?.low_stock_count : undefined,
       }, areas, tableTypes, priceRules, tables: visibleTables, sessions: enrichedSessions, reservations,
       categories, products, orders, orderItems, customers, tiers, invoices, invoiceItems, payments,
       inventory, shifts, users, roles, permissionRows, auditLogs, report,
+      reportMeta: reportFilter
+        ? {
+            from: reportFilter.from,
+            to: reportFilter.to,
+            timezone: reportFilter.timezone,
+            startUtc: reportFilter.startUtc,
+            endExclusiveUtc: reportFilter.endExclusiveUtc,
+            dayCount: reportFilter.dayCount,
+          }
+        : null,
     });
   } catch (error) { return responseError(error); }
 }
