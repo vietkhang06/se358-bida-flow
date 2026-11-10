@@ -1,3 +1,4 @@
+import { summarizeTableStatuses } from "@/lib/live-sync";
 import { effectiveTableStatus } from "@/lib/operation-validation";
 import {
   DEFAULT_REPORT_TIMEZONE,
@@ -79,6 +80,7 @@ export async function GET(request: Request) {
       ...table, status: effectiveTableStatus(table as { status: string }),
     }));
 
+    const tableSummary = summarizeTableStatuses(visibleTables);
     const canViewReports = allowed(user, "REPORTS_VIEW");
     const url = new URL(request.url);
     const reportFilter = canViewReports
@@ -103,7 +105,8 @@ export async function GET(request: Request) {
             AND julianday(starts_at) >= julianday(?) AND julianday(starts_at) < julianday(?)) AS reservation_count,
           (SELECT COALESCE(SUM(total_amount),0) FROM invoices WHERE status='PAID' AND paid_at IS NOT NULL
             AND julianday(paid_at) >= julianday(?) AND julianday(paid_at) < julianday(?)) AS today_revenue,
-          (SELECT COUNT(*) FROM products WHERE active=1 AND track_stock=1 AND stock_quantity <= min_stock) AS low_stock_count`,
+          (SELECT COUNT(*) FROM products WHERE active=1 AND track_stock=1 AND stock_quantity <= min_stock) AS low_stock_count,
+          (SELECT COUNT(*) FROM orders WHERE status='OPEN') AS open_orders_count`,
         todayRange.startUtc,
         todayRange.endExclusiveUtc,
         todayRange.startUtc,
@@ -113,8 +116,14 @@ export async function GET(request: Request) {
 
     return Response.json({
       user, summary: {
-        table_count: canSeeTables ? summary?.table_count : undefined,
-        playing_count: canSeeTables ? summary?.playing_count : undefined,
+        table_count: canSeeTables ? tableSummary.total : undefined,
+        playing_count: canSeeTables ? tableSummary.playing : undefined,
+        available_count: canSeeTables ? tableSummary.available : undefined,
+        reserved_count: canSeeTables ? tableSummary.reserved : undefined,
+        maintenance_count: canSeeTables ? tableSummary.maintenance : undefined,
+        open_orders_count: canSeeOrders ? summary?.open_orders_count : undefined,
+        snapshot_at: sampledAt.toISOString(),
+
         reservation_count: canManageReservations || canSeat ? summary?.reservation_count : undefined,
         today_revenue: canViewReports ? summary?.today_revenue : undefined,
         low_stock_count: allowed(user, "INVENTORY_MANAGE") ? summary?.low_stock_count : undefined,
@@ -131,6 +140,6 @@ export async function GET(request: Request) {
             dayCount: reportFilter.dayCount,
           }
         : null,
-    });
+    }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) { return responseError(error); }
 }
