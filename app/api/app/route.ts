@@ -7,7 +7,7 @@ import {
   resolveDayRangeUtc,
   resolveReportFilter,
 } from "@/lib/reporting";
-import { sessionTiming, queryAll, queryOne, requireUser, responseError } from "@/lib/server";
+import { sessionTimingsBatch, queryAll, queryOne, requireUser, responseError } from "@/lib/server";
 
 function allowed(user: Awaited<ReturnType<typeof requireUser>>, permission: string) {
   return user.roleCode === "ADMIN" || user.permissions.includes(permission);
@@ -71,11 +71,19 @@ export async function GET(request: Request) {
     ]);
 
     const sampledAt = new Date();
-    const enrichedSessions = await Promise.all((sessions as Array<Record<string, unknown>>).map(async (session) => {
-      const timing = await sessionTiming(String(session.id), sampledAt);
+    const openSessionIds = (sessions as Array<Record<string, unknown>>).filter((s) => s.status !== "CLOSED").map((s) => String(s.id));
+    const timingsMap = await sessionTimingsBatch(openSessionIds, sampledAt);
+    const enrichedSessions = (sessions as Array<Record<string, unknown>>).map((session) => {
+      const timing = timingsMap.get(String(session.id)) ?? { seconds: 0, amount: 0, sampledAt: sampledAt.toISOString() };
       return { ...session, live_table_amount: session.status === "CLOSED" ? session.table_amount : timing.amount,
         billable_seconds: timing.seconds, sampled_at: timing.sampledAt };
-    }));
+
+
+    });
+
+
+
+
     const visibleTables = (tables as Array<Record<string, unknown>>).map((table) => ({
       ...table, status: effectiveTableStatus(table as { status: string }),
     }));

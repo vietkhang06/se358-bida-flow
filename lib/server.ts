@@ -170,7 +170,8 @@ export async function currentUser(request: Request): Promise<AppUser | null> {
   const row = await queryOne<Record<string, string | null>>(`
     SELECT u.id, u.email, u.username, u.full_name, u.phone, u.status,
            r.code AS role_code, r.name AS role_name,
-           GROUP_CONCAT(p.code) AS permission_codes
+           GROUP_CONCAT(p.code) AS permission_codes,
+           MAX(CASE WHEN datetime(s.last_seen_at) <= datetime('now', '-60 seconds') THEN 1 ELSE 0 END) AS needs_touch
     FROM user_sessions s
     JOIN users u ON u.id = s.user_id
     JOIN roles r ON r.id = u.role_id
@@ -180,7 +181,9 @@ export async function currentUser(request: Request): Promise<AppUser | null> {
     GROUP BY u.id, r.id
   `, tokenHash);
   if (!row) return null;
-  await getRawDb().prepare("UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?").bind(tokenHash).run();
+  if (Number(row.needs_touch ?? 0) === 1) {
+    await getRawDb().prepare("UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?").bind(tokenHash).run();
+  }
   return {
     id: row.id!, email: row.email!, username: row.username, fullName: row.full_name!, phone: row.phone,
     roleCode: row.role_code!, roleName: row.role_name!, status: row.status!,
@@ -254,6 +257,41 @@ export async function sessionTiming(sessionId: string, endAt = new Date()) {
     amount += segmentAmount(active, segment.hourly_rate);
   }
   return { seconds, amount, sampledAt: endAt.toISOString() };
+}
+
+export async function sessionTimingsBatch(sessionIds: string[], endAt = new Date()) {
+  const result = new Map<string, { seconds: number; amount: number; sampledAt: string }>();
+  const sampledAt = endAt.toISOString();
+  if (!sessionIds.length) return result;
+  const uniqueIds = [...new Set(sessionIds)];
+  const chunkSize = 80;
+  for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+    const chunk = uniqueIds.slice(i, i + chunkSize);
+    const placeholders = chunk.map(() => "?").join(",");
+    const [segments, pauses] = await Promise.all([
+      queryAll<{ id: string; session_id: string; started_at: string; ended_at: string | null; hourly_rate: number }>(
+        `SELECT id, session_id, started_at, ended_at, hourly_rate FROM session_segments WHERE session_id IN (${placeholders}) ORDER BY started_at`,
+        ...chunk,
+      ),
+      queryAll<{ session_id: string; segment_id: string; started_at: string; ended_at: string | null }>(
+        `SELECT session_id, segment_id, started_at, ended_at FROM session_pauses WHERE session_id IN (${placeholders})`,
+        ...chunk,
+      ),
+    ]);
+    for (const sid of chunk) {
+      const segs = segments.filter((seg) => seg.session_id === sid);
+      const sesPauses = pauses.filter((pause) => pause.session_id === sid);
+      let seconds = 0;
+      let amount = 0;
+      for (const seg of segs) {
+        const active = billableSeconds(seg, sesPauses.filter((pause) => pause.segment_id === seg.id), endAt);
+        seconds += active;
+        amount += segmentAmount(active, seg.hourly_rate);
+      }
+      result.set(sid, { seconds, amount, sampledAt });
+    }
+  }
+  return result;
 }
 
 export async function calculateSessionAmount(sessionId: string, endAt = new Date()) {
