@@ -95,12 +95,10 @@ const worker = spawn(
     "--var",
     `SETUP_CODE:${setupCode}`,
   ],
-  { cwd: root, env: sharedEnv, stdio: ["ignore", "pipe", "pipe"] },
+  { cwd: root, env: sharedEnv, stdio: "ignore" },
 );
 
 let workerLogs = "";
-worker.stdout.on("data", (chunk) => { workerLogs += chunk.toString(); });
-worker.stderr.on("data", (chunk) => { workerLogs += chunk.toString(); });
 
 async function waitUntilReady(timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
@@ -122,6 +120,7 @@ async function waitUntilReady(timeoutMs = 30_000) {
 let exitCode = 1;
 try {
   await waitUntilReady();
+  await new Promise((resolve) => setTimeout(resolve, 1500));
   const child = spawnSync(process.execPath, [path.resolve(root, targetScript)], {
     cwd: root,
     env: {
