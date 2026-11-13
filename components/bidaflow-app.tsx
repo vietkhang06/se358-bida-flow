@@ -3,11 +3,11 @@
 
 import * as React from "react";
 import {
-  Activity, Archive, BarChart3, CalendarClock, Check,
+  Activity, AlertTriangle, Archive, BarChart3, CalendarClock, Check,
   CircleDollarSign, ClipboardList, Clock3, Coffee, CreditCard, DoorOpen, History,
   LockKeyhole, LogOut, PackagePlus, Pause, Pencil, Play, Plus,
   ReceiptText, RefreshCw, Search, Settings2, ShieldCheck, Sparkles,
-  Table2, TimerReset, UserRound, UsersRound, Warehouse, Wrench,
+  Table2, TimerReset, UserRound, UsersRound, Warehouse, WifiOff, Wrench,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -32,6 +32,14 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Toaster } from "@/components/ui/sonner";
+import { ReportsView, type ReportFilterValue } from "@/components/reports-view";
+import {
+  ApiRequestError,
+  classifySyncError,
+  createLatestSyncGuard,
+  LIVE_POLL_INTERVAL_MS,
+  type SyncState,
+} from "@/lib/live-sync";
 import { cn } from "@/lib/utils";
 
 declare global {
@@ -94,7 +102,7 @@ function StatusBadge({ value }: { value: string }) {
 async function requestJson(url: string, options?: RequestInit): Promise<any> {
   const response = await fetch(url, { ...options, headers: { "Content-Type": "application/json", ...(options?.headers ?? {}) } });
   const json = (await response.json().catch(() => ({}))) as any;
-  if (!response.ok) throw new Error(json.error || "Không thể hoàn tất yêu cầu.");
+  if (!response.ok) throw new ApiRequestError(json.error || "Không thể hoàn tất yêu cầu.", response.status);
   return json;
 }
 
@@ -185,12 +193,111 @@ export function BidaFlowApp() {
   const [loading, setLoading] = React.useState(true);
   const [page, setPage] = React.useState("tables");
   const [form, setForm] = React.useState<FormConfig | null>(null);
-  const loadData = React.useCallback(async () => { const next = await requestJson("/api/app"); setData(next); setAuth((current) => current ? { ...current, user: next.user } : { initialized: true, user: next.user }); }, []);
-  const loadAuth = React.useCallback(async () => { try { const next = await requestJson("/api/auth/status"); setAuth(next); if (next.user) await loadData(); } catch (error) { toast.error(error instanceof Error ? error.message : "Không thể kết nối hệ thống"); } finally { setLoading(false); } }, [loadData]);
-  React.useEffect(() => { queueMicrotask(() => { void loadAuth(); }); }, [loadAuth]);
-  React.useEffect(() => { if (!auth?.user) return; const timer = window.setInterval(() => loadData().catch(() => undefined), 30000); return () => window.clearInterval(timer); }, [auth?.user, loadData]);
+  const [reportFilter, setReportFilter] = React.useState<ReportFilterValue | null>(null);
+  const reportFilterRef = React.useRef<ReportFilterValue | null>(null);
+  const [bootError, setBootError] = React.useState<string | null>(null);
+  const [syncState, setSyncState] = React.useState<SyncState>("idle");
+  const [syncError, setSyncError] = React.useState<string | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = React.useState<string | null>(null);
+  const [syncGuard] = React.useState(() => createLatestSyncGuard());
+  const loadData = React.useCallback(async (force = false, overrideFilter?: ReportFilterValue | null) => {
+    const token = syncGuard.begin(force);
+    if (!token) return;
+    setSyncState("syncing");
+    try {
+      const activeFilter = overrideFilter !== undefined ? overrideFilter : reportFilterRef.current;
+      const params = activeFilter
+        ? `?reportFrom=${encodeURIComponent(activeFilter.from)}&reportTo=${encodeURIComponent(activeFilter.to)}&reportTz=${encodeURIComponent(activeFilter.tz)}`
+        : "";
+      const next = await requestJson(`/api/app${params}`, { signal: token.signal, cache: "no-store" });
+      if (!syncGuard.isCurrent(token.seq)) return;
+      setData(next);
+      setBootError(null);
+      setSyncError(null);
+      setSyncState("idle");
+      setLastSyncedAt(String(next.summary?.snapshot_at ?? new Date().toISOString()));
+      setAuth((current) => current ? { ...current, user: next.user } : { initialized: true, user: next.user });
+    } catch (error) {
+      const classified = classifySyncError(error, typeof navigator === "undefined" ? true : navigator.onLine);
+      if (classified.kind === "abort") return;
+      if (classified.kind === "unauthorized") {
+        syncGuard.invalidate();
+        setData(null);
+        setSyncError(null);
+        setSyncState("idle");
+        setAuth((current) => ({ initialized: current?.initialized ?? true, user: null }));
+        toast.error(classified.message);
+        return;
+      }
+      if (!syncGuard.isCurrent(token.seq)) return;
+      setSyncState(classified.kind === "offline" ? "offline" : "error");
+      setSyncError(classified.message);
+      throw error;
+    } finally {
+      syncGuard.finish(token.seq);
+    }
+  }, [syncGuard]);
+  const applyReportFilter = React.useCallback(async (nextFilter: ReportFilterValue | null) => {
+    await loadData(true, nextFilter);
+    reportFilterRef.current = nextFilter;
+    setReportFilter(nextFilter);
+  }, [loadData]);
+  const loadAuth = React.useCallback(async () => {
+    setLoading(true);
+    setBootError(null);
+    try {
+      const next = await requestJson("/api/auth/status", { cache: "no-store" });
+      setAuth(next);
+      if (next.user) {
+        try {
+          await loadData(true);
+        } catch (error) {
+          const classified = classifySyncError(error, typeof navigator === "undefined" ? true : navigator.onLine);
+          if (classified.kind !== "abort" && classified.kind !== "unauthorized") {
+            setBootError(classified.message);
+          }
+        }
+      }
+    } catch (error) {
+      const classified = classifySyncError(error, typeof navigator === "undefined" ? true : navigator.onLine);
+      setBootError(classified.kind === "abort" ? "Đã hủy kết nối." : classified.message);
+      toast.error(error instanceof Error ? error.message : "Không thể kết nối hệ thống");
+    } finally {
+      setLoading(false);
+    }
+  }, [loadData]);
+  React.useEffect(() => { queueMicrotask(() => { void loadAuth(); }); return () => syncGuard.invalidate(); }, [loadAuth, syncGuard]);
+  React.useEffect(() => {
+    if (!auth?.user) return;
+    const poll = () => {
+      if (document.visibilityState === "visible" && (typeof navigator === "undefined" || navigator.onLine !== false)) {
+        void loadData(false).catch(() => undefined);
+      }
+    };
+    const timer = window.setInterval(poll, LIVE_POLL_INTERVAL_MS);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void loadData(false).catch(() => undefined);
+    };
+    const onFocus = () => { void loadData(false).catch(() => undefined); };
+    const onOnline = () => { void loadData(true).catch(() => undefined); };
+    const onOffline = () => {
+      setSyncState("offline");
+      setSyncError("Mất kết nối mạng. Đang hiển thị dữ liệu gần nhất.");
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, [auth?.user, loadData]);
   const run = React.useCallback(async (action: string, payload: Record<string, any> = {}, refresh = true) => {
-    try { const response = await requestJson("/api/action", { method: "POST", body: JSON.stringify({ action, payload }) }); if (refresh) await loadData(); toast.success("Đã cập nhật"); return response.data; }
+    try { const response = await requestJson("/api/action", { method: "POST", body: JSON.stringify({ action, payload }) }); if (refresh) await loadData(true); toast.success("Đã cập nhật"); return response.data; }
     catch (error) { toast.error(error instanceof Error ? error.message : "Không thể hoàn tất thao tác"); throw error; }
   }, [loadData]);
   React.useEffect(() => {
@@ -202,7 +309,7 @@ export function BidaFlowApp() {
         name: "refresh_bidaflow_dashboard", title: "Làm mới BidaFlow", description: "Tải lại dữ liệu vận hành mới nhất và trả về chỉ số tổng quan.",
         inputSchema: { type: "object", properties: {}, additionalProperties: false },
         annotations: { readOnlyHint: true, untrustedContentHint: false },
-        execute: async () => { await loadData(); return { status: "refreshed" }; },
+        execute: async () => { await loadData(true); return { status: "refreshed" }; },
       },
       {
         name: "start_billiards_session", title: "Mở bàn bida", description: "Bắt đầu phiên chơi thật cho một bàn đang sẵn sàng.",
@@ -220,18 +327,23 @@ export function BidaFlowApp() {
     tools.forEach((tool) => { try { void Promise.resolve(register(tool, { signal: lifecycle.signal })).catch(() => undefined); } catch { /* unsupported implementation */ } });
     return () => lifecycle.abort();
   }, [auth?.user, data, loadData, run]);
-  const logout = async () => { await requestJson("/api/auth/logout", { method: "POST", body: "{}" }); setData(null); setAuth({ initialized: true, user: null }); };
+  const logout = async () => { syncGuard.invalidate(); await requestJson("/api/auth/logout", { method: "POST", body: "{}" }).catch(() => undefined); reportFilterRef.current = null; setReportFilter(null); setData(null); setSyncError(null); setSyncState("idle"); setLastSyncedAt(null); setAuth({ initialized: true, user: null }); };
   if (loading) return <LoadingScreen />;
+  if (bootError && !data) return <><ConnectionErrorScreen message={bootError} onRetry={() => void loadAuth()} /><Toaster richColors /></>;
   if (!auth?.user) return <><AuthScreen initialized={auth?.initialized ?? false} onSuccess={loadAuth} /><Toaster richColors /></>;
   if (!data) return <LoadingScreen />;
-  return <SidebarProvider><AppShell data={data} page={page} setPage={setPage} run={run} openForm={setForm} reload={loadData} logout={logout} /><QuickForm config={form} onClose={() => setForm(null)} /><Toaster richColors /></SidebarProvider>;
+  return <SidebarProvider><AppShell data={data} page={page} setPage={setPage} run={run} openForm={setForm} reload={() => loadData(true).catch(() => undefined)} logout={logout} syncState={syncState} syncError={syncError} lastSyncedAt={lastSyncedAt} reportFilter={reportFilter} applyReportFilter={applyReportFilter} /><QuickForm config={form} onClose={() => setForm(null)} /><Toaster richColors /></SidebarProvider>;
 }
 
 function LoadingScreen() {
   return <div className="grid min-h-screen place-items-center bg-[#f2f6f4]"><div className="space-y-4 text-center"><Logo dark /><div className="flex items-center gap-2 text-sm text-slate-500"><RefreshCw className="size-4 animate-spin" />Đang chuẩn bị không gian làm việc...</div></div></div>;
 }
 
-type ShellProps = { data: AppData; page: string; setPage: (page: string) => void; run: (action: string, payload?: Record<string, any>, refresh?: boolean) => Promise<any>; openForm: (form: FormConfig) => void; reload: () => Promise<void>; logout: () => Promise<void> };
+function ConnectionErrorScreen({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return <div className="grid min-h-screen place-items-center bg-[#f2f6f4] p-6"><Card className="max-w-md text-center"><CardHeader><div className="mx-auto mb-2 grid size-12 place-items-center rounded-2xl bg-rose-50 text-rose-600"><WifiOff className="size-6" /></div><CardTitle>Không thể kết nối máy chủ</CardTitle><CardDescription>{message}</CardDescription></CardHeader><CardContent><Button onClick={onRetry}><RefreshCw />Thử kết nối lại</Button></CardContent></Card></div>;
+}
+
+type ShellProps = { data: AppData; page: string; setPage: (page: string) => void; run: (action: string, payload?: Record<string, any>, refresh?: boolean) => Promise<any>; openForm: (form: FormConfig) => void; reload: () => Promise<void>; logout: () => Promise<void>; syncState?: SyncState; syncError?: string | null; lastSyncedAt?: string | null; reportFilter?: ReportFilterValue | null; applyReportFilter?: (next: ReportFilterValue | null) => Promise<void> };
 
 function AppShell(props: ShellProps) {
   const { setOpenMobile } = useSidebar();
@@ -256,8 +368,8 @@ function AppShell(props: ShellProps) {
       <SidebarContent><SidebarGroup><SidebarGroupLabel className="text-emerald-100/45">Điều hành</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>{nav.map((item) => <SidebarMenuItem key={item.id}><SidebarMenuButton isActive={props.page === item.id} tooltip={item.label} onClick={() => selectPage(item.id)}><item.icon /><span>{item.label}</span></SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu></SidebarGroupContent></SidebarGroup></SidebarContent>
       <SidebarFooter className="p-3"><button onClick={() => selectPage("profile")} className="flex w-full items-center gap-3 rounded-xl bg-white/5 p-2 text-left transition hover:bg-white/10"><div className="grid size-9 shrink-0 place-items-center rounded-xl bg-emerald-300 font-semibold text-emerald-950">{props.data.user.fullName.slice(0, 1).toUpperCase()}</div><div className="min-w-0 group-data-[collapsible=icon]:hidden"><p className="truncate text-sm font-medium">{props.data.user.fullName}</p><p className="truncate text-xs text-emerald-100/55">{props.data.user.roleName}</p></div></button></SidebarFooter>
     </Sidebar>
-    <SidebarInset className="min-w-0 bg-[#f2f6f4]"><header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-emerald-950/5 bg-[#f2f6f4]/90 px-4 backdrop-blur-xl sm:px-6"><SidebarTrigger className="md:hidden" /><div className="min-w-0"><h1 className="truncate text-lg font-semibold tracking-tight">{current.label}</h1><p className="hidden text-xs text-muted-foreground sm:block">{new Intl.DateTimeFormat("vi-VN", { dateStyle: "full", timeZone: "Asia/Ho_Chi_Minh" }).format(new Date())}</p></div><div className="ml-auto flex items-center gap-2"><Button variant="ghost" size="icon" onClick={() => props.reload()} aria-label="Làm mới"><RefreshCw /></Button><Badge variant="outline" className="hidden bg-white sm:flex">{props.data.user.roleName}</Badge></div></header>
-      <div className="soft-in mx-auto w-full max-w-[1500px] p-4 sm:p-6 lg:p-8"><PageContent {...props} page={current.id} permission={permission} /></div>
+    <SidebarInset className="min-w-0 bg-[#f2f6f4]"><header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-emerald-950/5 bg-[#f2f6f4]/90 px-4 backdrop-blur-xl sm:px-6"><SidebarTrigger className="md:hidden" /><div className="min-w-0"><h1 className="truncate text-lg font-semibold tracking-tight">{current.label}</h1><p className="hidden text-xs text-muted-foreground sm:block">{new Intl.DateTimeFormat("vi-VN", { dateStyle: "full", timeZone: "Asia/Ho_Chi_Minh" }).format(new Date())}</p></div><div className="ml-auto flex items-center gap-2"><LiveSyncIndicator syncState={props.syncState ?? "idle"} lastSyncedAt={props.lastSyncedAt ?? null} /><Button variant="ghost" size="icon" onClick={() => props.reload()} aria-label="Làm mới"><RefreshCw className={cn(props.syncState === "syncing" && "animate-spin")} /></Button><Badge variant="outline" className="hidden bg-white sm:flex">{props.data.user.roleName}</Badge></div></header>
+      <div className="soft-in mx-auto w-full max-w-[1500px] p-4 sm:p-6 lg:p-8">{(props.syncState === "offline" || props.syncState === "error") && props.syncError && <div role="alert" className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950"><div className="flex items-center gap-2">{props.syncState === "offline" ? <WifiOff className="size-4 text-rose-600" /> : <AlertTriangle className="size-4 text-amber-700" />}<span>{props.syncError}</span></div><Button size="sm" variant="outline" className="bg-white" onClick={() => props.reload()}><RefreshCw className="size-3.5" />Thử lại</Button></div>}<PageContent {...props} page={current.id} permission={permission} /></div>
     </SidebarInset>
   </>;
 }
@@ -270,7 +382,7 @@ function PageContent(props: ShellProps & { permission: (code: string) => boolean
   if (props.page === "billing") return <BillingView {...props} />;
   if (props.page === "inventory") return <InventoryView {...props} />;
   if (props.page === "shifts") return <ShiftsView {...props} />;
-  if (props.page === "reports") return <ReportsView {...props} />;
+  if (props.page === "reports") return <ReportsView report={props.data.report} reportMeta={props.data.reportMeta} activeFilter={props.reportFilter ?? null} onApplyFilter={props.applyReportFilter ?? (async () => {})} />;
   if (props.page === "admin") return <AdminView {...props} />;
   if (props.page === "audit") return <AuditView {...props} />;
   return <ProfileView {...props} />;
@@ -284,14 +396,27 @@ function EmptyState({ icon: Icon = ClipboardList, title, description, action }: 
   return <div className="grid min-h-56 place-items-center rounded-2xl border border-dashed bg-white/60 p-8 text-center"><div><div className="mx-auto mb-3 grid size-12 place-items-center rounded-2xl bg-emerald-50 text-emerald-700"><Icon /></div><h3 className="font-semibold">{title}</h3><p className="mx-auto mt-1 max-w-md text-sm text-muted-foreground">{description}</p>{action && <div className="mt-4">{action}</div>}</div></div>;
 }
 
+function LiveSyncIndicator({ syncState, lastSyncedAt }: { syncState: SyncState; lastSyncedAt: string | null }) {
+  const timeLabel = lastSyncedAt
+    ? new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "Asia/Ho_Chi_Minh" }).format(new Date(lastSyncedAt))
+    : null;
+  if (syncState === "offline") return <Badge variant="outline" className="border-rose-200 bg-rose-50 text-rose-700"><WifiOff className="mr-1 size-3" />Mất kết nối</Badge>;
+  if (syncState === "error") return <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800"><AlertTriangle className="mr-1 size-3" />Lỗi đồng bộ</Badge>;
+  if (syncState === "syncing") return <Badge variant="outline" className="border-sky-200 bg-sky-50 text-sky-700">Đang đồng bộ...</Badge>;
+  return <Badge variant="outline" className="hidden bg-white text-emerald-800 sm:flex"><span className="mr-1.5 inline-block size-2 rounded-full bg-emerald-500" />Trực tiếp{timeLabel ? ` · ${timeLabel}` : ""}</Badge>;
+}
+
 function SummaryCards({ data }: { data: AppData }) {
+  const tableSub = data.summary.table_count !== undefined
+    ? `Sẵn sàng ${data.summary.available_count ?? 0} · Đặt ${data.summary.reserved_count ?? 0} · Bảo trì ${data.summary.maintenance_count ?? 0}`
+    : undefined;
   const cards = [
-    { label: "Bàn đang chơi", value: `${data.summary.playing_count ?? 0}/${data.summary.table_count ?? 0}`, icon: Play, tint: "bg-sky-50 text-sky-700" },
-    { label: "Lịch đặt hôm nay", value: data.summary.reservation_count ?? 0, icon: CalendarClock, tint: "bg-amber-50 text-amber-700" },
-    { label: "Doanh thu hôm nay", value: data.summary.today_revenue === undefined ? "—" : money(data.summary.today_revenue), icon: CircleDollarSign, tint: "bg-emerald-50 text-emerald-700" },
-    { label: "Hàng sắp hết", value: data.summary.low_stock_count ?? "—", icon: Archive, tint: "bg-rose-50 text-rose-700" },
+    { label: "Bàn đang chơi", value: `${data.summary.playing_count ?? 0}/${data.summary.table_count ?? 0}`, sub: tableSub, icon: Play, tint: "bg-sky-50 text-sky-700" },
+    { label: "Lịch đặt hôm nay", value: data.summary.reservation_count ?? 0, sub: data.summary.open_orders_count !== undefined ? `${data.summary.open_orders_count} order đang mở` : undefined, icon: CalendarClock, tint: "bg-amber-50 text-amber-700" },
+    { label: "Doanh thu hôm nay", value: data.summary.today_revenue === undefined ? "—" : money(data.summary.today_revenue), sub: undefined, icon: CircleDollarSign, tint: "bg-emerald-50 text-emerald-700" },
+    { label: "Hàng sắp hết", value: data.summary.low_stock_count ?? "—", sub: undefined, icon: Archive, tint: "bg-rose-50 text-rose-700" },
   ];
-  return <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{cards.map((card) => <Card key={card.label} className="gap-3 border-0 py-4 shadow-[0_8px_30px_rgba(13,49,39,.05)]"><CardContent className="flex items-center gap-3 px-4"><div className={cn("grid size-11 place-items-center rounded-2xl", card.tint)}><card.icon className="size-5" /></div><div><p className="text-xs font-medium text-muted-foreground">{card.label}</p><p className="mt-1 text-xl font-semibold tracking-tight">{card.value}</p></div></CardContent></Card>)}</div>;
+  return <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{cards.map((card) => <Card key={card.label} className="gap-3 border-0 py-4 shadow-[0_8px_30px_rgba(13,49,39,.05)]"><CardContent className="flex items-center gap-3 px-4"><div className={cn("grid size-11 shrink-0 place-items-center rounded-2xl", card.tint)}><card.icon className="size-5" /></div><div className="min-w-0"><p className="text-xs font-medium text-muted-foreground">{card.label}</p><p className="mt-1 text-xl font-semibold tracking-tight">{card.value}</p>{card.sub && <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{card.sub}</p>}</div></CardContent></Card>)}</div>;
 }
 
 function TablesView(props: ShellProps) {
@@ -317,7 +442,7 @@ function TablesView(props: ShellProps) {
     <SummaryCards data={props.data} />
     <SectionHeader title="Sơ đồ bàn trực tiếp" description="Trạng thái, thời gian và tiền tạm tính được cập nhật liên tục." actions={<><div className="relative"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm bàn..." className="w-44 bg-white pl-9" /></div><NativeSelect value={area} onChange={(event) => setArea(event.target.value)} className="bg-white"><NativeSelectOption value="all">Tất cả khu vực</NativeSelectOption>{(props.data.areas as Row[]).map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect><NativeSelect aria-label="Lọc trạng thái bàn" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><NativeSelectOption value="all">Mọi trạng thái</NativeSelectOption>{["AVAILABLE","PLAYING","RESERVED","MAINTENANCE"].map((status) => <NativeSelectOption key={status} value={status}>{STATUS[status].label}</NativeSelectOption>)}</NativeSelect></>} />
     <div className="mb-5 flex flex-wrap gap-2 text-xs">{["AVAILABLE", "PLAYING", "RESERVED", "MAINTENANCE"].map((status) => <StatusBadge key={status} value={status} />)}</div>
-    {!tables.length ? <EmptyState icon={Table2} title="Chưa có bàn để hiển thị" description="Quản lý cần tạo khu vực, loại bàn và bàn trong phần Quản trị." action={allowed("TABLES_MANAGE") ? <Button onClick={() => props.setPage("admin")}><Settings2 />Mở cấu hình</Button> : undefined} /> :
+    {!tables.length ? ((props.data.tables as Row[]).length > 0 ? <EmptyState icon={Search} title="Không có bàn khớp bộ lọc" description="Thử xóa từ khóa tìm kiếm hoặc đặt lại bộ lọc khu vực/trạng thái." action={<Button variant="outline" onClick={() => { setArea("all"); setStatusFilter("all"); setQuery(""); }}>Xóa bộ lọc</Button>} /> : <EmptyState icon={Table2} title="Chưa có bàn để hiển thị" description="Quản lý cần tạo khu vực, loại bàn và bàn trong phần Quản trị." action={allowed("TABLES_MANAGE") ? <Button onClick={() => props.setPage("admin")}><Settings2 />Mở cấu hình</Button> : undefined} />) :
       <div className="space-y-7">{(props.data.areas as Row[]).filter((item) => area === "all" || item.id === area).map((item) => { const areaTables = tables.filter((table) => table.area_id === item.id); if (!areaTables.length) return null; return <section key={item.id}><div className="mb-3 flex items-center gap-2"><h3 className="font-semibold">{item.name}</h3><Badge variant="secondary">{areaTables.length} bàn</Badge></div><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">{areaTables.map((table) => {
         const session = activeSessions.find((candidate) => candidate.table_id === table.id);
         const cardTone = table.status === "PLAYING" ? "border-sky-200 bg-gradient-to-br from-white to-sky-50" : table.status === "RESERVED" ? "border-amber-200 bg-gradient-to-br from-white to-amber-50" : table.status === "MAINTENANCE" ? "border-slate-200 bg-slate-50" : "border-emerald-100 bg-gradient-to-br from-white to-emerald-50/60";
@@ -452,21 +577,6 @@ function ShiftsView(props: ShellProps) {
     <Card className={cn("mb-6 overflow-hidden border-0 text-white", openShift ? "bg-gradient-to-br from-[#0b6b55] to-[#123f35]" : "bg-gradient-to-br from-slate-600 to-slate-800")}><CardContent className="grid gap-6 px-6 py-7 sm:grid-cols-[1fr_auto] sm:items-center"><div><div className="mb-3 flex items-center gap-2"><Activity className="size-5" /><span className="text-sm font-medium text-white/70">Trạng thái cá nhân</span></div><h3 className="text-3xl font-semibold">{openShift ? "Ca đang mở" : "Chưa mở ca"}</h3><p className="mt-2 text-sm text-white/65">{openShift ? `Bắt đầu ${dateTime(openShift.opened_at)} · tiền đầu ca ${money(openShift.opening_cash)}` : "Mở ca trước khi nhận thanh toán tiền mặt."}</p></div>{openShift && <div className="rounded-2xl bg-white/10 px-5 py-4 text-right"><p className="text-xs text-white/60">Mã ca</p><p className="mt-1 font-mono font-semibold">{openShift.code}</p></div>}</CardContent></Card>
     <Card className="gap-0 overflow-hidden py-0"><Table><TableHeader><TableRow><TableHead>Mã ca</TableHead><TableHead>Thu ngân</TableHead><TableHead>Mở ca</TableHead><TableHead>Chốt ca</TableHead><TableHead>Dự kiến</TableHead><TableHead>Thực tế</TableHead><TableHead>Chênh lệch</TableHead><TableHead>Trạng thái</TableHead></TableRow></TableHeader><TableBody>{(props.data.shifts as Row[]).map((row) => <TableRow key={row.id}><TableCell className="font-mono text-xs">{row.code}</TableCell><TableCell>{row.cashier_name}</TableCell><TableCell>{dateTime(row.opened_at)}</TableCell><TableCell>{dateTime(row.closed_at)}</TableCell><TableCell>{row.expected_cash == null ? "-" : money(row.expected_cash)}</TableCell><TableCell>{row.actual_cash == null ? "-" : money(row.actual_cash)}</TableCell><TableCell className={cn(Number(row.difference) !== 0 && "font-semibold text-rose-600")}>{row.difference == null ? "-" : money(row.difference)}</TableCell><TableCell><StatusBadge value={row.status} /></TableCell></TableRow>)}</TableBody></Table></Card>
   </>;
-}
-
-function ReportsView(props: ShellProps) {
-  const report = props.data.report ?? { revenue: [], tables: [], products: [], inventory: [] };
-  const revenue = report.revenue as Row[];
-  const maxRevenue = Math.max(1, ...revenue.map((item) => Number(item.revenue)));
-  return <><SectionHeader title="Báo cáo & thống kê" description="Chỉ tổng hợp hóa đơn đã thanh toán và giao dịch kho hợp lệ." />
-    <div className="grid gap-5 xl:grid-cols-[1.4fr_.6fr]"><Card className="gap-4"><CardHeader><CardTitle>Doanh thu 30 ngày</CardTitle><CardDescription>Phân tách tiền bàn và sản phẩm/dịch vụ</CardDescription></CardHeader><CardContent><div className="flex h-64 items-end gap-2 overflow-x-auto pb-2">{revenue.length ? revenue.map((item) => <div key={item.day} className="group flex h-full min-w-8 flex-1 flex-col justify-end gap-1"><div className="relative flex min-h-1 flex-col justify-end overflow-hidden rounded-t-lg bg-emerald-100" style={{ height: `${Math.max(4, Number(item.revenue) / maxRevenue * 100)}%` }} title={`${item.day}: ${money(item.revenue)}`}><div className="bg-amber-400" style={{ height: `${Number(item.service_revenue) / Math.max(1, Number(item.revenue)) * 100}%` }} /><div className="bg-emerald-600" style={{ height: `${Number(item.table_revenue) / Math.max(1, Number(item.revenue)) * 100}%` }} /></div><span className="truncate text-center text-[10px] text-muted-foreground">{String(item.day).slice(5)}</span></div>) : <div className="grid h-full w-full place-items-center text-sm text-muted-foreground">Chưa có doanh thu trong kỳ</div>}</div><div className="mt-4 flex gap-4 text-xs"><span className="flex items-center gap-2"><i className="size-2.5 rounded-full bg-emerald-600" />Tiền bàn</span><span className="flex items-center gap-2"><i className="size-2.5 rounded-full bg-amber-400" />Dịch vụ</span></div></CardContent></Card>
-      <Card className="gap-4"><CardHeader><CardTitle>Cơ cấu kỳ này</CardTitle><CardDescription>Từ các giao dịch hợp lệ</CardDescription></CardHeader><CardContent className="space-y-5">{(() => { const tableRevenue = revenue.reduce((sum, item) => sum + Number(item.table_revenue), 0); const serviceRevenue = revenue.reduce((sum, item) => sum + Number(item.service_revenue), 0); const total = tableRevenue + serviceRevenue; return <><div><p className="text-sm text-muted-foreground">Tổng doanh thu</p><p className="mt-1 text-3xl font-semibold">{money(total)}</p></div><div className="space-y-3"><div><div className="mb-1 flex justify-between text-xs"><span>Tiền bàn</span><span>{total ? Math.round(tableRevenue / total * 100) : 0}%</span></div><Progress value={total ? tableRevenue / total * 100 : 0} /></div><div><div className="mb-1 flex justify-between text-xs"><span>Sản phẩm / dịch vụ</span><span>{total ? Math.round(serviceRevenue / total * 100) : 0}%</span></div><Progress value={total ? serviceRevenue / total * 100 : 0} /></div></div></>; })()}</CardContent></Card></div>
-    <div className="mt-5 grid gap-5 xl:grid-cols-2"><ReportTable title="Hiệu suất bàn" columns={["Bàn", "Số phiên", "Thời gian", "Doanh thu"]} rows={(report.tables as Row[]).map((item) => [item.name, item.session_count, `${Math.round(Number(item.minutes))} phút`, money(item.revenue)])} /><ReportTable title="Sản phẩm bán chạy" columns={["Sản phẩm", "Số lượng", "Doanh thu"]} rows={(report.products as Row[]).map((item) => [item.name, item.quantity, money(item.revenue)])} /><ReportTable title="Nhập - xuất - tồn" columns={["Hàng hóa", "Nhập", "Xuất", "Tồn"]} rows={(report.inventory as Row[]).map((item) => [item.name, item.imported, item.exported, item.stock_quantity])} /></div>
-  </>;
-}
-
-function ReportTable({ title, columns, rows }: { title: string; columns: string[]; rows: any[][] }) {
-  return <Card className="gap-0 overflow-hidden py-0"><div className="border-b px-5 py-4"><h3 className="font-semibold">{title}</h3></div><Table><TableHeader><TableRow>{columns.map((column) => <TableHead key={column}>{column}</TableHead>)}</TableRow></TableHeader><TableBody>{rows.length ? rows.map((row, index) => <TableRow key={index}>{row.map((cell, cellIndex) => <TableCell key={cellIndex}>{cell}</TableCell>)}</TableRow>) : <TableRow><TableCell colSpan={columns.length} className="h-28 text-center text-muted-foreground">Chưa có dữ liệu</TableCell></TableRow>}</TableBody></Table></Card>;
 }
 
 function AdminView(props: ShellProps) {
